@@ -1,9 +1,6 @@
-* fs_override: If not delayed & output effect failed (no-op), it might
-  still indicate input, so send it, but send it with failure=true.
-
-  Haskell side can assert failure outputs are absolute paths (or it
-  would be delayed), and then we know that they're legitimate inputs
-  (but not outputs)
+* Avoid sendGo for bad delayed outputs, so we don't need to "undo"
+  their effects?  Only try to undo disallowed CREATION effects of
+  undelayed outputs, so need a bit for created_output for undelayed
 
 * runCmd should not take Target? Prints should be outside? It can be pretty generalized and perhaps out of Buildsome
 
