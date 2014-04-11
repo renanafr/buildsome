@@ -1,6 +1,8 @@
 * Avoid sendGo for bad delayed outputs, so we don't need to "undo"
-  their effects?  Only try to undo disallowed CREATION effects of
-  undelayed outputs, so need a bit for created_output for undelayed
+  their effects?
+
+* Only try to undo disallowed CREATION effects of undelayed outputs,
+  so need a bit for created_output for undelayed
 
 * runCmd should not take Target? Prints should be outside? It can be pretty generalized and perhaps out of Buildsome
 

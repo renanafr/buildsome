@@ -25,6 +25,7 @@ import Data.Time (DiffTime)
 import Data.Traversable (traverse)
 import Data.Typeable (Typeable)
 import Lib.AnnotatedException (annotateException)
+import Lib.Applicative (partitionA)
 import Lib.BuildId (BuildId)
 import Lib.BuildMaps (BuildMaps(..), DirectoryBuildMap(..), TargetRep)
 import Lib.ColorText (ColorText, renderStr)
@@ -238,13 +239,14 @@ handleLegalUnspecifiedOutputs buildsome target paths = do
       Opts.DeleteUnspecifiedOutputs -> ("deleting", mapM_ removeFileOrDirectoryOrNothing paths)
       Opts.DontDeleteUnspecifiedOutputs -> ("keeping", registerLeakedOutputs buildsome (S.fromList paths))
 
-data IllegalUnspecifiedOutputs = IllegalUnspecifiedOutputs Target [FilePath] deriving (Typeable)
+data IllegalUnspecifiedOutputs = IllegalUnspecifiedOutputs Target [FilePath] String deriving (Typeable)
 instance E.Exception IllegalUnspecifiedOutputs
 instance Show IllegalUnspecifiedOutputs where
-  show (IllegalUnspecifiedOutputs target illegalOutputs) =
+  show (IllegalUnspecifiedOutputs target illegalOutputs msg) =
     renderStr $ Color.error $ mconcat
     [ "Target: ", targetShow (targetOutputs target)
-    , " wrote to unspecified output files: ", show illegalOutputs ]
+    , " wrote to unspecified output files: ", show illegalOutputs
+    , msg ]
 
 -- Verify output of whole of slave/execution log
 verifyTargetSpec :: Buildsome -> Set FilePath -> Set FilePath -> Target -> IO ()
@@ -282,7 +284,7 @@ verifyTargetOutputs buildsome outputs target = do
     Print.warn (targetPos target) $ "leaving leaked unspecified output effects" -- Need to make sure we only record actual outputs, and not *attempted* outputs before we delete this
     -- mapM_ removeFileOrDirectory existingIllegalOutputs
 
-    E.throwIO $ IllegalUnspecifiedOutputs target existingIllegalOutputs
+    E.throwIO $ IllegalUnspecifiedOutputs target existingIllegalOutputs " (created but not deleted)"
   warnOverSpecified "outputs" specified (outputs `S.union` phoniesSet buildsome) (targetPos target)
   where
     (unspecifiedOutputs, illegalOutputs) =
@@ -564,19 +566,38 @@ runCmd bte@BuildTargetEnv{..} parCell target = do
       recordedOutputs <- readIORef outputsRef
       let outputs = filter (not . outputIgnored) rawOutputs
           inputs = filter (not . inputIgnored recordedOutputs) rawInputs
-      filteredOutputs <-
+      effectiveOutputs <-
         case isDelayed of
         FSHook.NotDelayed ->
+          -- Non-delayed outputs need to be banned from other jobs, and they need to be marked "created".
+
+          -- TODO: Get "created_output", "effective_output" flag. This should be stored
+          -- for the output, is always allowed at this stage, but if
+          -- it is eventually not deleted, verifyTargetOutputs will
+          -- yell and delete the output to undo the effect. If
+          -- "created_output" is false, then the output is disallowed
+          -- here, but we cannot undo the effect, so we should also
+          -- warn about it
+
           -- We'd like to filter those with no effect, but due to
           -- undelayed fs access, we really can't
           return outputs
         FSHook.Delayed -> do
           makeInputs accessDoc inputs outputs
-          filterM outputHasEffect outputs
+          effectiveOutputs <-
+            S.fromList . map FSHook.outputPath <$>
+            filterM outputHasEffect outputs
+          let allowedOutputs = targetOutputsSet `S.union` M.keysSet recordedOutputs
+          (existingIllegalOutputs, _nonExistingIllegalOutputs) <-
+            partitionA Dir.exists (S.toList (effectiveOutputs `S.difference` allowedOutputs))
+          -- TODO: add _nonExistingIllegalOutputs to ban list --
+          -- for all cmd inputs
+          unless (null existingIllegalOutputs) $ E.throwIO $
+            IllegalUnspecifiedOutputs target existingIllegalOutputs "Trying to output to unspecified existing file"
+          return effectiveOutputs
       -- After makeInputs, we know the current FS state will determine
       -- output's actual behavior.
-      recordOutputs bteBuildsome outputsRef accessDoc targetOutputsSet $
-        S.fromList $ map FSHook.outputPath filteredOutputs
+      recordOutputs bteBuildsome outputsRef accessDoc targetOutputsSet effectiveOutputs
       mapM_ (recordInput inputsRef accessDoc) inputs
   (time, stdOutputs) <-
     FSHook.timedRunCommand (bsFsHook bteBuildsome) (bsRootPath bteBuildsome)
